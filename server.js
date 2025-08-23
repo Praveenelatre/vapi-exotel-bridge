@@ -77,6 +77,7 @@ wss.on("connection", async (exotelWs, request) => {
       if (obj.event === "media") {
         const base64 = obj.media?.payload || "";
         const buf = Buffer.from(base64, "base64");
+console.log("Exotel frame size:", buf.length);
         if (vapiWs.readyState === WebSocket.OPEN) vapiWs.send(buf);
       }
       if (obj.event === "stop") {
