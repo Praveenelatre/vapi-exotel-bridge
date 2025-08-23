@@ -28,7 +28,7 @@ const server = http.createServer(async (req, res) => {
           assistantId: ASSISTANT_ID,
           transport: {
             provider: "vapi.websocket",
-            audioFormat: { format: "pcm_s16le", container: "raw", sampleRate: 8000 }
+            audioFormat: { format: "pcm_s16le", container: "raw", sampleRate: 16000 }
           }
         })
       });
