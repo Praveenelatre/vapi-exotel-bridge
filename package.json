@@ -1,0 +1,14 @@
+{
+  "name": "vapi-exotel-bridge",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "node-fetch": "^3.3.2"
+  }
+}
+
