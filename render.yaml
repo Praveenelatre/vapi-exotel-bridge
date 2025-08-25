@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: vapi-exotel-bridge
+    env: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: VAPI_API_KEY
+        sync: false
+      - key: VAPI_ASSISTANT_ID
+        sync: false
+      - key: PORT
+        value: 3000
