@@ -108,13 +108,45 @@ function chunkBuffer(buf, size) {
   return chunks
 }
 
+function genTone8kPcm16LE(ms, hz) {
+  const samples = Math.floor(8 * ms)
+  const out = Buffer.alloc(samples * 2)
+  const twoPi = 2 * Math.PI
+  for (let i = 0; i < samples; i++) {
+    const t = i / 8000
+    const s = Math.sin(twoPi * hz * t)
+    const v = Math.max(-1, Math.min(1, s)) * 12000
+    out.writeInt16LE(v | 0, i * 2)
+  }
+  return out
+}
+
+function buildOutboundFrame(base64Payload, meta) {
+  const out = { event: 'media', media: { payload: base64Payload } }
+  if (meta.stream_id) out.stream_id = meta.stream_id
+  if (meta.streamSid) out.streamSid = meta.streamSid
+  if (meta.streamId) out.streamId = meta.streamId
+  if (meta.call_id) out.call_id = meta.call_id
+  if (meta.callId) out.callId = meta.callId
+  if (meta.track) out.track = meta.track
+  if (meta.media && meta.media.contentType) {
+    out.media.contentType = meta.media.contentType
+  } else if (meta.contentType) {
+    out.media.contentType = meta.contentType
+  } else {
+    out.media.contentType = 'audio/l16;rate=8000;channels=1'
+  }
+  return out
+}
+
 function bridgeSockets(frejunWs, vapiWs, mode) {
   let closed = false
   let inCount = 0
   let outCount = 0
   const outQueue = []
   let sender = null
-  let streamId = null
+  const meta = {}
+  let debugTextCount = 0
 
   function safeClose() {
     if (closed) return
@@ -133,9 +165,8 @@ function bridgeSockets(frejunWs, vapiWs, mode) {
     try {
       if (mode.fmt === 'json') {
         const payload = next.toString('base64')
-        const out = { event: 'media', media: { payload } }
-        if (streamId) { out.stream_id = streamId; out.streamSid = streamId }
-        frejunWs.send(JSON.stringify(out))
+        const frame = buildOutboundFrame(payload, meta)
+        frejunWs.send(JSON.stringify(frame))
       } else {
         frejunWs.send(next, { binary: true })
       }
@@ -165,14 +196,21 @@ function bridgeSockets(frejunWs, vapiWs, mode) {
         return
       }
       const s = msg.toString()
+      if (debugTextCount < 5) {
+        console.log('frejun text', s.slice(0, 400))
+        debugTextCount++
+      }
       try {
         const obj = JSON.parse(s)
-        if (!streamId) {
-          if (obj.stream_id) streamId = obj.stream_id
-          else if (obj.streamSid) streamId = obj.streamSid
-          else if (obj.start && obj.start.streamId) streamId = obj.start.streamId
-        }
-        if (obj && obj.event === 'media' && obj.media && obj.media.payload) {
+        if (obj.stream_id && !meta.stream_id) meta.stream_id = obj.stream_id
+        if (obj.streamSid && !meta.streamSid) meta.streamSid = obj.streamSid
+        if (obj.streamId && !meta.streamId) meta.streamId = obj.streamId
+        if (obj.call_id && !meta.call_id) meta.call_id = obj.call_id
+        if (obj.callId && !meta.callId) meta.callId = obj.callId
+        if (obj.track && !meta.track) meta.track = obj.track
+        if (obj.media && obj.media.contentType && !meta.media) meta.media = { contentType: obj.media.contentType }
+        if (obj.start && obj.start.streamId && !meta.streamId) meta.streamId = obj.start.streamId
+        if (obj.event === 'media' && obj.media && obj.media.payload) {
           const raw = Buffer.from(obj.media.payload, 'base64')
           if (mode.mode === 'echo') {
             outQueue.push(raw)
@@ -185,7 +223,7 @@ function bridgeSockets(frejunWs, vapiWs, mode) {
             inCount++
           }
         }
-        if (obj && obj.event === 'stop') safeClose()
+        if (obj.event === 'stop') safeClose()
       } catch {}
     } catch {}
   })
@@ -206,19 +244,6 @@ function bridgeSockets(frejunWs, vapiWs, mode) {
   if (vapiWs) vapiWs.on('close', () => safeClose())
   frejunWs.on('error', () => safeClose())
   if (vapiWs) vapiWs.on('error', () => safeClose())
-}
-
-function genTone8kPcm16LE(ms, hz) {
-  const samples = Math.floor(8 * ms)
-  const out = Buffer.alloc(samples * 2)
-  const twoPi = 2 * Math.PI
-  for (let i = 0; i < samples; i++) {
-    const t = i / 8000
-    const s = Math.sin(twoPi * hz * t)
-    const v = Math.max(-1, Math.min(1, s)) * 12000
-    out.writeInt16LE(v | 0, i * 2)
-  }
-  return out
 }
 
 server.on('upgrade', async (req, socket, head) => {
