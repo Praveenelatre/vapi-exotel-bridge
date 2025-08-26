@@ -7,23 +7,37 @@ const crypto = require('crypto')
 
 const VAPI_KEY = process.env.VAPI_API_KEY
 const VAPI_ASSISTANT_ID = process.env.VAPI_ASSISTANT_ID
-const FREJUN_API_KEY = process.env.FREJUN_API_KEY || ''
 const FREJUN_WEBHOOK_SECRET = process.env.FREJUN_WEBHOOK_SECRET || ''
 
 const app = express()
 app.use(express.json({ limit: '2mb' }))
 
+app.get('/', (req, res) => {
+  res.json({ ok: true, endpoints: ['/health', '/ws-entry (GET|POST)', '/frejun (WS)', '/frejun/webhook'] })
+})
+
 app.get('/health', (req, res) => {
   res.json({ ok: true })
 })
 
-app.get('/ws-entry', (req, res) => {
+function wsUrl(req) {
   const proto = req.headers['x-forwarded-proto'] || 'http'
   const host = req.headers['x-forwarded-host'] || req.headers.host
   const wsProto = proto === 'https' ? 'wss' : 'ws'
-  const url = `${wsProto}://${host}/frejun`
-  res.json({ url })
-})
+  return `${wsProto}://${host}/frejun`
+}
+
+function wsEntryHandler(req, res) {
+  const url = wsUrl(req)
+  res.type('application/json').status(200).send(JSON.stringify({
+    action: "Stream",
+    ws_url: url,
+    chunk_size: 1000
+  }))
+}
+
+app.get('/ws-entry', wsEntryHandler)
+app.post('/ws-entry', wsEntryHandler)
 
 app.post('/frejun/webhook', (req, res) => {
   try {
@@ -34,6 +48,7 @@ app.post('/frejun/webhook', (req, res) => {
       const digest = hmac.update(body).digest('hex')
       if (digest !== sig) return res.status(401).json({ ok: false })
     }
+    console.log('frejun webhook', JSON.stringify(req.body))
     res.json({ ok: true })
   } catch {
     res.status(200).json({ ok: true })
