@@ -24,7 +24,7 @@ function wsUrl(req) {
   const proto = req.headers['x-forwarded-proto'] || 'http'
   const host = req.headers['x-forwarded-host'] || req.headers.host
   const wsProto = proto === 'https' ? 'wss' : 'ws'
-  const qs = 'fmt=bin&vapiSr=16000&frejunSr=8000&frejunFmt=pcm'
+  const qs = 'fmt=json&vapiSr=16000&frejunSr=8000&frejunFmt=pcm'
   return `${wsProto}://${host}/frejun?${qs}`
 }
 
@@ -70,80 +70,42 @@ function openVapiSocket() {
   ).then(r => r.data.transport.websocketCallUrl)
 }
 
+function readInt16LE(buf, i) {
+  return buf.readInt16LE(i * 2)
+}
+
+function writeInt16LE(buf, i, v) {
+  buf.writeInt16LE(v, i * 2)
+}
+
+function upsample8kTo16kLE(pcm8) {
+  const frames = pcm8.length / 2
+  const out = Buffer.alloc(frames * 4)
+  for (let i = 0; i < frames; i++) {
+    const a = readInt16LE(pcm8, i)
+    const b = i + 1 < frames ? readInt16LE(pcm8, i + 1) : a
+    writeInt16LE(out, i * 2, a)
+    writeInt16LE(out, i * 2 + 1, (a + b) >> 1)
+  }
+  return out
+}
+
+function downsample16kTo8kLE(pcm16) {
+  const frames = pcm16.length / 2
+  const out = Buffer.alloc(Math.floor(frames / 2) * 2)
+  let j = 0
+  for (let i = 0; i + 1 < frames; i += 2) {
+    const a = readInt16LE(pcm16, i)
+    const b = readInt16LE(pcm16, i + 1)
+    writeInt16LE(out, j++, (a + b) >> 1)
+  }
+  return out
+}
+
 function chunkBuffer(buf, size) {
   const chunks = []
   for (let i = 0; i < buf.length; i += size) chunks.push(buf.subarray(i, i + size))
   return chunks
-}
-
-function toInt16(buf) {
-  return new Int16Array(buf.buffer, buf.byteOffset, buf.length / 2)
-}
-
-function fromInt16(arr) {
-  return Buffer.from(new Uint8Array(new Uint8Array(arr.buffer, arr.byteOffset, arr.length * 2)))
-}
-
-function upsample8kTo16k(pcm8) {
-  const s8 = toInt16(pcm8)
-  const out = new Int16Array(s8.length * 2)
-  let j = 0
-  for (let i = 0; i < s8.length; i++) {
-    const a = s8[i]
-    const b = i + 1 < s8.length ? s8[i + 1] : a
-    out[j++] = a
-    out[j++] = (a + b) >> 1
-  }
-  return fromInt16(out)
-}
-
-function downsample16kTo8k(pcm16) {
-  const s16 = toInt16(pcm16)
-  const out = new Int16Array(Math.floor(s16.length / 2))
-  let j = 0
-  for (let i = 0; i + 1 < s16.length; i += 2) {
-    out[j++] = (s16[i] + s16[i + 1]) >> 1
-  }
-  return fromInt16(out)
-}
-
-function linearToMuLawSample(sample) {
-  const BIAS = 0x84
-  const CLIP = 32635
-  let s = sample
-  if (s > CLIP) s = CLIP
-  if (s < -CLIP) s = -CLIP
-  let sign = (s < 0) ? 0x80 : 0x00
-  if (s < 0) s = -s
-  s = s + BIAS
-  let exponent = 7
-  for (let expMask = 0x4000; (s & expMask) === 0 && exponent > 0; expMask >>= 1) exponent--
-  let mantissa = (s >> (exponent + 3)) & 0x0F
-  let mu = ~(sign | (exponent << 4) | mantissa) & 0xFF
-  return mu
-}
-
-function muLawToLinearSample(mu) {
-  mu = ~mu & 0xFF
-  const sign = mu & 0x80
-  let exponent = (mu >> 4) & 0x07
-  let mantissa = mu & 0x0F
-  let s = ((mantissa << 3) + 0x84) << (exponent + 3)
-  s = s - 0x84
-  return sign ? -s : s
-}
-
-function pcm16ToMulaw(pcm16) {
-  const s16 = toInt16(pcm16)
-  const out = Buffer.allocUnsafe(s16.length)
-  for (let i = 0; i < s16.length; i++) out[i] = linearToMuLawSample(s16[i])
-  return out
-}
-
-function mulawToPcm16(mu) {
-  const out = new Int16Array(mu.length)
-  for (let i = 0; i < mu.length; i++) out[i] = muLawToLinearSample(mu[i])
-  return fromInt16(out)
 }
 
 function bridgeSockets(frejunWs, vapiWs, mode) {
@@ -182,8 +144,7 @@ function bridgeSockets(frejunWs, vapiWs, mode) {
   frejunWs.on('message', msg => {
     try {
       if (Buffer.isBuffer(msg)) {
-        const pcm8 = mode.frejunFmt === 'mulaw' ? mulawToPcm16(msg) : msg
-        const pcm16 = mode.frejunSr === 8000 && mode.vapiSr === 16000 ? upsample8kTo16k(pcm8) : pcm8
+        const pcm16 = mode.frejunSr === 8000 && mode.vapiSr === 16000 ? upsample8kTo16kLE(msg) : msg
         if (vapiWs.readyState === WebSocket.OPEN) {
           vapiWs.send(pcm16)
           inCount++
@@ -195,8 +156,7 @@ function bridgeSockets(frejunWs, vapiWs, mode) {
         const obj = JSON.parse(s)
         if (obj && obj.event === 'media' && obj.media && obj.media.payload) {
           const raw = Buffer.from(obj.media.payload, 'base64')
-          const pcm8 = mode.frejunFmt === 'mulaw' ? mulawToPcm16(raw) : raw
-          const pcm16 = mode.frejunSr === 8000 && mode.vapiSr === 16000 ? upsample8kTo16k(pcm8) : pcm8
+          const pcm16 = mode.frejunSr === 8000 && mode.vapiSr === 16000 ? upsample8kTo16kLE(raw) : raw
           if (vapiWs.readyState === WebSocket.OPEN) {
             vapiWs.send(pcm16)
             inCount++
@@ -210,10 +170,8 @@ function bridgeSockets(frejunWs, vapiWs, mode) {
   vapiWs.on('message', data => {
     try {
       if (Buffer.isBuffer(data)) {
-        const pcm8 = mode.frejunSr === 8000 && mode.vapiSr === 16000 ? downsample16kTo8k(data) : data
-        const outBuf = mode.frejunFmt === 'mulaw' ? pcm16ToMulaw(pcm8) : pcm8
-        const frame = mode.frejunFmt === 'mulaw' ? 160 : 320
-        const chunks = chunkBuffer(outBuf, frame)
+        const pcm8 = mode.frejunSr === 8000 && mode.vapiSr === 16000 ? downsample16kTo8kLE(data) : data
+        const chunks = chunkBuffer(pcm8, 320)
         for (const c of chunks) outQueue.push(c)
       }
     } catch {}
@@ -228,10 +186,10 @@ function bridgeSockets(frejunWs, vapiWs, mode) {
 server.on('upgrade', async (req, socket, head) => {
   if (req.url && req.url.startsWith('/frejun')) {
     const u = new URL(req.url, 'http://x')
-    const fmt = u.searchParams.get('fmt') === 'json' ? 'json' : 'bin'
+    const fmt = u.searchParams.get('fmt') === 'bin' ? 'bin' : 'json'
     const vapiSr = parseInt(u.searchParams.get('vapiSr') || '16000', 10)
     const frejunSr = parseInt(u.searchParams.get('frejunSr') || '8000', 10)
-    const frejunFmt = u.searchParams.get('frejunFmt') || 'mulaw'
+    const frejunFmt = u.searchParams.get('frejunFmt') || 'pcm'
     const mode = { fmt, vapiSr, frejunSr, frejunFmt }
     console.log('upgrade frejun', mode)
     wss.handleUpgrade(req, socket, head, async ws => {
