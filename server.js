@@ -24,7 +24,12 @@ function wsUrl(req) {
   const proto = req.headers['x-forwarded-proto'] || 'http'
   const host = req.headers['x-forwarded-host'] || req.headers.host
   const wsProto = proto === 'https' ? 'wss' : 'ws'
-  const qs = 'fmt=json&vapiSr=16000&frejunSr=8000&frejunFmt=pcm'
+  const fmt = req.query.fmt || 'json'
+  const mode = req.query.mode || 'bridge'
+  const vapiSr = req.query.vapiSr || '16000'
+  const frejunSr = req.query.frejunSr || '8000'
+  const frejunFmt = req.query.frejunFmt || 'pcm'
+  const qs = `fmt=${fmt}&mode=${mode}&vapiSr=${vapiSr}&frejunSr=${frejunSr}&frejunFmt=${frejunFmt}`
   return `${wsProto}://${host}/frejun?${qs}`
 }
 
@@ -108,6 +113,19 @@ function chunkBuffer(buf, size) {
   return chunks
 }
 
+function genTone8kPcm16LE(ms, hz) {
+  const samples = Math.floor(8 * ms)
+  const out = Buffer.alloc(samples * 2)
+  const twoPi = 2 * Math.PI
+  for (let i = 0; i < samples; i++) {
+    const t = i / 8000
+    const s = Math.sin(twoPi * hz * t)
+    const v = Math.max(-1, Math.min(1, s)) * 12000
+    out.writeInt16LE(v | 0, i * 2)
+  }
+  return out
+}
+
 function bridgeSockets(frejunWs, vapiWs, mode) {
   let closed = false
   let inCount = 0
@@ -119,7 +137,7 @@ function bridgeSockets(frejunWs, vapiWs, mode) {
     if (closed) return
     closed = true
     try { frejunWs.close() } catch {}
-    try { vapiWs.close() } catch {}
+    if (vapiWs) try { vapiWs.close() } catch {}
     if (sender) clearInterval(sender)
     console.log('bridge closed', { inCount, outCount, mode })
   }
@@ -132,8 +150,7 @@ function bridgeSockets(frejunWs, vapiWs, mode) {
     try {
       if (mode.fmt === 'json') {
         const payload = next.toString('base64')
-        const out = { event: 'media', media: { payload } }
-        frejunWs.send(JSON.stringify(out))
+        frejunWs.send(JSON.stringify({ event: 'media', media: { payload } }))
       } else {
         frejunWs.send(next, { binary: true })
       }
@@ -141,12 +158,23 @@ function bridgeSockets(frejunWs, vapiWs, mode) {
     } catch {}
   }, 20)
 
+  if (mode.mode === 'tone') {
+    const tone = genTone8kPcm16LE(2000, 440)
+    const chunks = chunkBuffer(tone, 320)
+    for (const c of chunks) outQueue.push(c)
+  }
+
   frejunWs.on('message', msg => {
     try {
       if (Buffer.isBuffer(msg)) {
-        const pcm16 = mode.frejunSr === 8000 && mode.vapiSr === 16000 ? upsample8kTo16kLE(msg) : msg
-        if (vapiWs.readyState === WebSocket.OPEN) {
-          vapiWs.send(pcm16)
+        if (mode.mode === 'echo') {
+          outQueue.push(msg)
+          inCount++
+          return
+        }
+        if (vapiWs && vapiWs.readyState === WebSocket.OPEN) {
+          const to16k = mode.frejunSr === 8000 && mode.vapiSr === 16000 ? upsample8kTo16kLE(msg) : msg
+          vapiWs.send(to16k)
           inCount++
         }
         return
@@ -156,9 +184,14 @@ function bridgeSockets(frejunWs, vapiWs, mode) {
         const obj = JSON.parse(s)
         if (obj && obj.event === 'media' && obj.media && obj.media.payload) {
           const raw = Buffer.from(obj.media.payload, 'base64')
-          const pcm16 = mode.frejunSr === 8000 && mode.vapiSr === 16000 ? upsample8kTo16kLE(raw) : raw
-          if (vapiWs.readyState === WebSocket.OPEN) {
-            vapiWs.send(pcm16)
+          if (mode.mode === 'echo') {
+            outQueue.push(raw)
+            inCount++
+            return
+          }
+          if (vapiWs && vapiWs.readyState === WebSocket.OPEN) {
+            const to16k = mode.frejunSr === 8000 && mode.vapiSr === 16000 ? upsample8kTo16kLE(raw) : raw
+            vapiWs.send(to16k)
             inCount++
           }
         }
@@ -167,20 +200,22 @@ function bridgeSockets(frejunWs, vapiWs, mode) {
     } catch {}
   })
 
-  vapiWs.on('message', data => {
-    try {
-      if (Buffer.isBuffer(data)) {
-        const pcm8 = mode.frejunSr === 8000 && mode.vapiSr === 16000 ? downsample16kTo8kLE(data) : data
-        const chunks = chunkBuffer(pcm8, 320)
-        for (const c of chunks) outQueue.push(c)
-      }
-    } catch {}
-  })
+  if (vapiWs) {
+    vapiWs.on('message', data => {
+      try {
+        if (Buffer.isBuffer(data)) {
+          const to8k = mode.frejunSr === 8000 && mode.vapiSr === 16000 ? downsample16kTo8kLE(data) : data
+          const chunks = chunkBuffer(to8k, 320)
+          for (const c of chunks) outQueue.push(c)
+        }
+      } catch {}
+    })
+  }
 
   frejunWs.on('close', () => safeClose())
-  vapiWs.on('close', () => safeClose())
+  if (vapiWs) vapiWs.on('close', () => safeClose())
   frejunWs.on('error', () => safeClose())
-  vapiWs.on('error', () => safeClose())
+  if (vapiWs) vapiWs.on('error', () => safeClose())
 }
 
 server.on('upgrade', async (req, socket, head) => {
@@ -190,17 +225,22 @@ server.on('upgrade', async (req, socket, head) => {
     const vapiSr = parseInt(u.searchParams.get('vapiSr') || '16000', 10)
     const frejunSr = parseInt(u.searchParams.get('frejunSr') || '8000', 10)
     const frejunFmt = u.searchParams.get('frejunFmt') || 'pcm'
-    const mode = { fmt, vapiSr, frejunSr, frejunFmt }
-    console.log('upgrade frejun', mode)
+    const mode = u.searchParams.get('mode') || 'bridge'
+    const conf = { fmt, vapiSr, frejunSr, frejunFmt, mode }
+    console.log('upgrade frejun', conf)
     wss.handleUpgrade(req, socket, head, async ws => {
       try {
-        const vapiUrl = await openVapiSocket()
-        const vws = new WebSocket(vapiUrl, { perMessageDeflate: false })
-        vws.on('open', () => {
-          console.log('vapi ws open', mode)
-          bridgeSockets(ws, vws, mode)
-        })
-        vws.on('error', () => { try { ws.close() } catch {} })
+        if (mode === 'bridge') {
+          const vapiUrl = await openVapiSocket()
+          const vws = new WebSocket(vapiUrl, { perMessageDeflate: false })
+          vws.on('open', () => {
+            console.log('vapi ws open', conf)
+            bridgeSockets(ws, vws, conf)
+          })
+          vws.on('error', () => { try { ws.close() } catch {} })
+        } else {
+          bridgeSockets(ws, null, conf)
+        }
       } catch {
         try { ws.close() } catch {}
       }
