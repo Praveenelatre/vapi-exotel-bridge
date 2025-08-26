@@ -75,13 +75,8 @@ function openVapiSocket() {
   ).then(r => r.data.transport.websocketCallUrl)
 }
 
-function readInt16LE(buf, i) {
-  return buf.readInt16LE(i * 2)
-}
-
-function writeInt16LE(buf, i, v) {
-  buf.writeInt16LE(v, i * 2)
-}
+function readInt16LE(buf, i) { return buf.readInt16LE(i * 2) }
+function writeInt16LE(buf, i, v) { buf.writeInt16LE(v, i * 2) }
 
 function upsample8kTo16kLE(pcm8) {
   const frames = pcm8.length / 2
@@ -113,25 +108,13 @@ function chunkBuffer(buf, size) {
   return chunks
 }
 
-function genTone8kPcm16LE(ms, hz) {
-  const samples = Math.floor(8 * ms)
-  const out = Buffer.alloc(samples * 2)
-  const twoPi = 2 * Math.PI
-  for (let i = 0; i < samples; i++) {
-    const t = i / 8000
-    const s = Math.sin(twoPi * hz * t)
-    const v = Math.max(-1, Math.min(1, s)) * 12000
-    out.writeInt16LE(v | 0, i * 2)
-  }
-  return out
-}
-
 function bridgeSockets(frejunWs, vapiWs, mode) {
   let closed = false
   let inCount = 0
   let outCount = 0
   const outQueue = []
   let sender = null
+  let streamId = null
 
   function safeClose() {
     if (closed) return
@@ -150,7 +133,9 @@ function bridgeSockets(frejunWs, vapiWs, mode) {
     try {
       if (mode.fmt === 'json') {
         const payload = next.toString('base64')
-        frejunWs.send(JSON.stringify({ event: 'media', media: { payload } }))
+        const out = { event: 'media', media: { payload } }
+        if (streamId) { out.stream_id = streamId; out.streamSid = streamId }
+        frejunWs.send(JSON.stringify(out))
       } else {
         frejunWs.send(next, { binary: true })
       }
@@ -182,6 +167,11 @@ function bridgeSockets(frejunWs, vapiWs, mode) {
       const s = msg.toString()
       try {
         const obj = JSON.parse(s)
+        if (!streamId) {
+          if (obj.stream_id) streamId = obj.stream_id
+          else if (obj.streamSid) streamId = obj.streamSid
+          else if (obj.start && obj.start.streamId) streamId = obj.start.streamId
+        }
         if (obj && obj.event === 'media' && obj.media && obj.media.payload) {
           const raw = Buffer.from(obj.media.payload, 'base64')
           if (mode.mode === 'echo') {
@@ -216,6 +206,19 @@ function bridgeSockets(frejunWs, vapiWs, mode) {
   if (vapiWs) vapiWs.on('close', () => safeClose())
   frejunWs.on('error', () => safeClose())
   if (vapiWs) vapiWs.on('error', () => safeClose())
+}
+
+function genTone8kPcm16LE(ms, hz) {
+  const samples = Math.floor(8 * ms)
+  const out = Buffer.alloc(samples * 2)
+  const twoPi = 2 * Math.PI
+  for (let i = 0; i < samples; i++) {
+    const t = i / 8000
+    const s = Math.sin(twoPi * hz * t)
+    const v = Math.max(-1, Math.min(1, s)) * 12000
+    out.writeInt16LE(v | 0, i * 2)
+  }
+  return out
 }
 
 server.on('upgrade', async (req, socket, head) => {
