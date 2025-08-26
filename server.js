@@ -96,31 +96,26 @@ function bridgeSockets(frejunWs, vapiWs) {
     if (frejunWs.readyState !== WebSocket.OPEN) return
     const next = outQueue.shift()
     if (!next) return
-    const payload = next.toString('base64')
-    const out = { event: 'media', media: { payload } }
     try {
-      frejunWs.send(JSON.stringify(out))
+      frejunWs.send(next, { binary: true })
       outCount++
     } catch {}
   }, 20)
 
-  const keepalive = Buffer.alloc(320, 0)
-  for (let i = 0; i < 50; i++) outQueue.push(keepalive)
-
   frejunWs.on('message', msg => {
     try {
-      if (!msg) return
-      let obj
-      if (Buffer.isBuffer(msg)) return
-      obj = JSON.parse(msg.toString())
-      if (obj && obj.event === 'media' && obj.media && obj.media.payload) {
-        const raw = Buffer.from(obj.media.payload, 'base64')
+      if (Buffer.isBuffer(msg)) {
         if (vapiWs.readyState === WebSocket.OPEN) {
-          vapiWs.send(raw)
+          vapiWs.send(msg)
           inCount++
         }
+        return
       }
-      if (obj && obj.event === 'stop') safeClose()
+      const s = msg.toString()
+      try {
+        const obj = JSON.parse(s)
+        if (obj && obj.event === 'stop') safeClose()
+      } catch {}
     } catch {}
   })
 
