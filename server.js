@@ -24,7 +24,7 @@ function wsUrl(req) {
   const proto = req.headers['x-forwarded-proto'] || 'http'
   const host = req.headers['x-forwarded-host'] || req.headers.host
   const wsProto = proto === 'https' ? 'wss' : 'ws'
-  const qs = 'fmt=json&vapiSr=16000&frejunSr=8000&frejunFmt=mulaw'
+  const qs = 'fmt=json&vapiSr=16000&frejunSr=8000&frejunFmt=pcm'
   return `${wsProto}://${host}/frejun?${qs}`
 }
 
